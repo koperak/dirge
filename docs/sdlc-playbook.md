@@ -173,24 +173,7 @@ Remember: all colors must come from CSS variables in theme.css, never hard-coded
 /memory review           # approve queued writes (when memory.confirm_writes is on)
 ```
 
-**Step 5. Optional: a stronger model for design.** Create `.dirge/agents/architect.md`:
-
-```markdown
----
-model: anthropic/claude-opus
-prompt: plan
----
-You are a software architect. Prefer small, reversible decisions and state trade-offs.
-```
-
-Then switch to it:
-
-```text
-/agent architect
-/agent off
-```
-
-The exact frontmatter keys are in `docs/agents.md`. Check them before relying on the sample above.
+**Step 5. Optional: a stronger model and persona for design.** Use an agent profile. See [section 6](#6-agent-profiles-agent) for the `architect` and `analyst` examples.
 
 ---
 
@@ -349,7 +332,7 @@ Review the diff against main.
 ```
 
 ```text
-/agent reviewer               # a profile defined in .dirge/agents/reviewer.md
+/agent reviewer               # a profile; see section 6
 ```
 
 **Step 5. Autonomous run with a stop condition** (goal gate, judged by `critic_provider`):
@@ -450,6 +433,133 @@ claude mcp add dirge -- dirge mcp
 
 ---
 
+## 6. Agent profiles (`/agent`)
+
+An agent profile is a named persona: a system prompt, a model and a tool policy bundled together. Profiles are opt-in. Nothing changes until you run `/agent <name>`. Reference: `docs/agents.md`.
+
+**Commands**
+
+```text
+/agents              # list profiles (active one marked *) and the built-in role routing
+/agent analyst       # activate: applies prompt, tool policy and model
+/agent off           # deactivate: restores the previous /prompt and model
+```
+
+**Where profiles live** (a more specific one overrides a more general one of the same name):
+
+1. `.dirge/agents/<name>.md` (project, highest precedence)
+2. `~/.config/dirge/agents/<name>.md` (global)
+3. `agents` in `config.json` (lowest)
+
+**File format.** The filename is the profile name, the body is the system prompt, and all frontmatter keys are optional:
+
+| Key | Meaning |
+|---|---|
+| `model` | A `providers` alias or a model name. Omit to keep the current model |
+| `deny_tools` | Tools denied while the profile is active |
+| `allow_tools` | Deny every built-in tool not listed. `deny_tools` wins if both are set |
+| `reasoning` | Effort on activation: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `temperature` | Sampling temperature, 0.0 to 2.0 |
+| `description` | One line shown in `/agents` |
+| `subagent_tools` | Tier for `task(agent=...)` subagents: `toolless` (default), `readonly`, `readwrite` |
+
+**How it combines with `/prompt`**
+- The profile's `deny_tools` are added to the active prompt's denies. A profile can add restrictions but never remove them. To drop a prompt's restrictions, switch the prompt, not the agent.
+- A profile's body replaces the system prompt only while the profile is on.
+- Only the model name is switched. A profile that points at a different provider backend is not supported yet.
+
+### Requirements: an analyst profile
+
+`.dirge/agents/analyst.md`:
+
+```markdown
+---
+model: opus
+reasoning: high
+deny_tools: [write, edit, apply_patch, bash]
+description: requirements analyst, cannot change files
+---
+You are a requirements analyst. Ask one question at a time. For each
+requirement, write a SHALL statement and WHEN/THEN scenarios. List open
+questions and assumptions separately. Do not write code.
+```
+
+`spec` is not in `deny_tools`, so the analyst can still record the change:
+
+```text
+/agent analyst
+We need CSV export for reports. What are the requirements?
+Record the agreed requirements as a spec change.
+```
+
+For a discussion-only profile that stores nothing, add `spec` to `deny_tools`.
+
+### Design: an architect profile
+
+`.dirge/agents/architect.md`:
+
+```markdown
+---
+model: opus
+reasoning: max
+deny_tools: [write, edit, apply_patch]
+description: architect, explores the code but cannot change it
+---
+You are a senior architect. Explore the codebase first. Propose 2-3
+approaches with trade-offs, recommend one, and list the rejected alternatives.
+```
+
+```text
+/agent architect
+Design CSV export given the current report module.
+Record the decision in the design field of the change.
+```
+
+`bash` and `spec` are still allowed here, so the architect can run read-only commands and record the design. Add them to `deny_tools` if you don't want that.
+
+### Review: a cheap read-only reviewer
+
+```markdown
+---
+model: haiku
+deny_tools: [bash, write, edit, apply_patch]
+description: read-only reviewer on a cheap fast model
+---
+You are a meticulous code reviewer. Read the diff and the surrounding code,
+then report concrete findings ordered by severity. Do not modify files.
+```
+
+The same profile can be defined in `config.json`:
+
+```jsonc
+{
+  "agents": {
+    "reviewer": {
+      "model": "haiku",
+      "deny_tools": ["bash", "write", "edit", "apply_patch"],
+      "description": "read-only reviewer on a cheap fast model"
+    }
+  }
+}
+```
+
+### Subagents under a profile
+
+When profiles exist, the agent's `task` tool accepts an `agent` argument:
+
+```text
+task(prompt="Review the auth changes for security issues", agent="reviewer")
+```
+
+- By default the subagent is a one-shot with no tools. It uses only the profile's model and system prompt.
+- To let it explore the repo, add `subagent_tools: readonly` to the profile. `readwrite` also lets it edit files and run builds, which is only suitable for delegated implementation work.
+- A tooled subagent can't use `task`, `memory`, `skill`, `spec`, `issue`, `question` or the todo list. Only the main agent records specs and issues.
+- Naming a profile that isn't defined is an error.
+
+**Profiles and role routing are separate.** `/agent` changes the main loop's persona. The `*_provider` keys (critic, review, summarization, subagent, escalation) in `config.json` keep working as before.
+
+---
+
 ## End-to-end example
 
 ```text
@@ -468,4 +578,4 @@ claude mcp add dirge -- dirge mcp
 
 - Everything the agent tracks (specs, issues, memory) lives in `.dirge/sessions/state.db`. Check whether your VCS ignores `.dirge/` if you don't want it shared.
 - `/plan`, `/loop` and `/code-review` depend on config or build features (`phased_workflow_enabled`, the `loop` feature, `critic_provider`). Check `docs/config.md` before relying on them.
-- Syntax in the `spec(...)` examples comes from `skills/spec-driven-workflow/SKILL.md`. The agent-profile frontmatter keys, the `/allow add` argument form and the config snippets are illustrative. Check them against `docs/agents.md`, `docs/permissions.md` and `docs/config.md`.
+- Syntax in the `spec(...)` examples comes from `skills/spec-driven-workflow/SKILL.md`. Agent-profile keys come from `docs/agents.md`. Model names such as `opus` and `haiku` are examples from that doc: use a `providers` alias or a model name valid for your provider. The `/allow add` argument form and the config snippets are illustrative. Check them against `docs/permissions.md` and `docs/config.md`.
